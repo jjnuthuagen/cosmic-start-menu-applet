@@ -7,6 +7,17 @@ Notable changes to this fork, on top of upstream
 
 ### Fixed
 
+- A tile GIF cannot take the applet down: the decoder is given a canvas and
+  allocation ceiling, instead of `image`'s unlimited default (a header
+  claiming 65535x65535 is 17 GB allocated before a frame is read).
+- The menu and the Settings window no longer share one temp file when they
+  save `config.toml`, so two saves at once cannot leave a half-written config
+  in place.
+- Recovering from an unparseable `config.toml` never overwrites the file when
+  it could not first be moved aside, and Settings refuses to save over it
+  rather than replacing the pins it could not read with an empty menu.
+- An App Library folder filter this build does not know is logged at warn
+  instead of debug, since the Folders view is then empty.
 - Search matches a query word by word, so an app whose name holds every word —
   `office libre`, `fire fox` — is found instead of returning nothing.
 - A tile colour with a non-ASCII character where 3 or 6 hex digits are expected

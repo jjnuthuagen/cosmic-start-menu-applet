@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use cosmic::widget::image::Handle;
 use image::codecs::gif::GifDecoder;
-use image::AnimationDecoder;
+use image::{AnimationDecoder, ImageDecoder, Limits};
 
 /// A decoded animated image, ready to draw.
 pub struct Animation {
@@ -113,7 +113,18 @@ fn decode(key: &Key) -> Option<Animation> {
     if !is_gif(&data) {
         return None;
     }
-    let decoder = GifDecoder::new(std::io::Cursor::new(data)).ok()?;
+    let mut decoder = GifDecoder::new(std::io::Cursor::new(data)).ok()?;
+    // A GIF header declares its canvas and `image`'s decoder allocates it
+    // before reading a frame — 65535x65535 is 17 GB from a ten-byte header,
+    // which kills a resident applet (it also decodes with `no_limits` by
+    // default). A tile picture is drawn at a few hundred pixels.
+    // ponytail: one flat ceiling; a legitimately larger picture falls back to
+    // the still path, which has its own cap.
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(64 << 20);
+    decoder.set_limits(limits).ok()?;
     // Decoded a frame at a time, not collected first: the decoder hands each
     // frame back at the GIF's full canvas, so collecting them all costs
     // canvas x frames (a 1080p, 100-frame GIF is most of a gigabyte) before a
@@ -280,6 +291,36 @@ mod tests {
         let a = load(&path, 8, 8, 0.0).expect("long gif should still decode");
         assert_eq!(a.frames.len(), MAX_FRAMES);
         assert_eq!(a.delays.len(), MAX_FRAMES);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A 5000x5000 canvas holding one 1x1 frame: valid GIF, 100 MB of canvas
+    /// to allocate before the frame is ever reached.
+    fn big_canvas_gif() -> Vec<u8> {
+        let mut g = b"GIF89a".to_vec();
+        g.extend_from_slice(&5000u16.to_le_bytes()); // logical screen width
+        g.extend_from_slice(&5000u16.to_le_bytes()); // height
+        g.extend_from_slice(&[0x80, 0x00, 0x00]); // global colour table, 2 entries
+        g.extend_from_slice(&[0, 0, 0, 255, 255, 255]); // black, white
+        g.extend_from_slice(&[0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0]); // 1x1 image
+        g.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]); // LZW: clear, pixel, end
+        g.push(0x3B); // trailer
+        g
+    }
+
+    #[test]
+    fn a_huge_declared_canvas_is_refused_not_allocated() {
+        let bytes = big_canvas_gif();
+        // The control: the bytes really do decode when the decoder is left
+        // unlimited, which is how `image` starts out. So the refusal below is
+        // the limits, not a broken fixture.
+        let control = GifDecoder::new(std::io::Cursor::new(bytes.clone())).unwrap();
+        assert_eq!(control.into_frames().count(), 1);
+
+        let tmp = std::env::temp_dir().join(format!("start-menu-huge-{}.gif", std::process::id()));
+        std::fs::write(&tmp, &bytes).unwrap();
+        let path = tmp.to_string_lossy().into_owned();
+        assert!(load(&path, 16, 16, 0.0).is_none());
         let _ = std::fs::remove_file(&tmp);
     }
 
