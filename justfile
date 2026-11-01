@@ -61,9 +61,13 @@ restart:
     # button would go on poking the build from before this install. Cycling
     # `plugins_wings` only ever restarts the applet, one level above it.
     pkill -f 'cosmic-start-menu-applet --(toggle|prewarm)' || true
-    wings="$HOME/.config/cosmic/com.system76.CosmicPanel.Panel/v1/plugins_wings"
-    if ! grep -q '{{appid}}' "$wings" 2>/dev/null; then
-        echo "Not in the panel; nothing to restart."
+    # The applet can live in any panel's wing — the top Panel or the Dock — so
+    # find the one that actually lists it. Hardcoding the Panel path missed a
+    # Dock install: this recipe killed the menu, then reported "not in the
+    # panel", and left the old build live for the session.
+    wings=$(grep -rl '{{appid}}' "$HOME"/.config/cosmic/com.system76.CosmicPanel*/v1/plugins_wings 2>/dev/null | head -1) || true
+    if [ -z "$wings" ]; then
+        echo "Not in a panel; nothing to restart."
         exit 0
     fi
     saved=$(mktemp)

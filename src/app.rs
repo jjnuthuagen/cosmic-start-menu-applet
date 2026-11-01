@@ -1313,7 +1313,7 @@ impl App {
         if pinned.is_empty() {
             0.0
         } else {
-            ui::ZONE_LABEL_HEIGHT + pinned.len() as f32 * ui::ROW_HEIGHT
+            ui::app_list::block_height(pinned.len())
         }
     }
 
@@ -1326,7 +1326,7 @@ impl App {
             .filter_map(|&i| self.folders.get(i))
             .map(|f| f.apps.len())
             .sum();
-        ui::HEADER_HEIGHT + (self.folders.len() + open) as f32 * ui::ROW_HEIGHT
+        ui::app_list::block_height(self.folders.len() + open)
     }
 
     /// Scroll the list, and remember where to: `scroll_to` is an operation

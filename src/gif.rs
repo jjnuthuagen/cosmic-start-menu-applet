@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use cosmic::widget::image::Handle;
 use image::codecs::gif::GifDecoder;
-use image::AnimationDecoder;
+use image::{AnimationDecoder, ImageDecoder, Limits};
 
 /// A decoded animated image, ready to draw.
 pub struct Animation {
@@ -33,6 +33,20 @@ pub struct Animation {
 /// still still-frames correctly.
 pub fn is_gif(data: &[u8]) -> bool {
     data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")
+}
+
+/// Whether the file at `path` begins with a GIF magic, reading only its first
+/// six bytes.
+///
+/// The render path sniffs every tile on every frame, so a full read — a video,
+/// a 200 MB photo set as a tile picture — to test six bytes is not acceptable.
+pub fn is_gif_file(path: &str) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 6];
+    file.read_exact(&mut head).is_ok() && is_gif(&head)
 }
 
 /// Whether the file at `path` is an animated GIF with more than one frame.
@@ -88,35 +102,61 @@ pub fn load(path: &str, w: u32, h: u32, radius: f32) -> Option<std::sync::Arc<An
     built
 }
 
+/// The most frames a tile animation is decoded to. A tile picture is a file
+/// the user points at, and a long looping GIF there should not be allowed to
+/// fill memory with frames the menu will never show.
+/// ponytail: one flat ceiling; raise it if a genuinely longer loop is wanted.
+const MAX_FRAMES: usize = 120;
+
 fn decode(key: &Key) -> Option<Animation> {
     let data = std::fs::read(&key.path).ok()?;
     if !is_gif(&data) {
         return None;
     }
-    let decoder = GifDecoder::new(std::io::Cursor::new(data)).ok()?;
-    // `collect_frames` on a malformed GIF returns Err; the caller takes that
-    // as "no animation", and the still path draws whatever it can decode of
-    // the file instead.
-    let decoded = decoder.into_frames().collect_frames().ok()?;
-    if decoded.is_empty() {
-        return None;
-    }
-    let mut frames = Vec::with_capacity(decoded.len());
-    let mut delays = Vec::with_capacity(decoded.len());
-    for frame in decoded {
+    let mut decoder = GifDecoder::new(std::io::Cursor::new(data)).ok()?;
+    // A GIF header declares its canvas and `image`'s decoder allocates it
+    // before reading a frame — 65535x65535 is 17 GB from a ten-byte header,
+    // which kills a resident applet (it also decodes with `no_limits` by
+    // default). A tile picture is drawn at a few hundred pixels.
+    // ponytail: one flat ceiling; a legitimately larger picture falls back to
+    // the still path, which has its own cap.
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(64 << 20);
+    decoder.set_limits(limits).ok()?;
+    // Decoded a frame at a time, not collected first: the decoder hands each
+    // frame back at the GIF's full canvas, so collecting them all costs
+    // canvas x frames (a 1080p, 100-frame GIF is most of a gigabyte) before a
+    // single resize. Resizing as we go keeps only the tile-sized frames live.
+    // A malformed frame means "no animation" — the still path draws what it
+    // can of the file instead.
+    let mut frames = Vec::new();
+    let mut delays = Vec::new();
+    for frame in decoder.into_frames().take(MAX_FRAMES) {
+        let frame = frame.ok()?;
         let delay = Duration::from(frame.delay());
         // Clamp to a sensible minimum: the GIF spec's 100 Hz headroom reads
         // as "animate as fast as possible" and some pack `delay = 0`.
         let delay = delay.max(Duration::from_millis(20));
-        let buffer = frame.into_buffer();
-        let resized =
-            image::imageops::resize(&buffer, key.w, key.h, image::imageops::FilterType::Triangle);
-        let mut rgba = resized.into_raw();
+        let mut rgba = fit(frame.into_buffer(), key.w, key.h).into_raw();
         crate::tileimage::apply_mask(&mut rgba, key.w, key.h, key.radius as f32);
         frames.push(Handle::from_rgba(key.w, key.h, rgba));
         delays.push(delay);
     }
+    if frames.is_empty() {
+        return None;
+    }
     Some(Animation { frames, delays })
+}
+
+/// Scale one frame to the tile, cover-cropped, the same treatment
+/// `tileimage::build` gives a still — so a non-square GIF keeps its aspect
+/// ratio instead of being stretched to the tile's box.
+fn fit(buffer: image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
+    image::DynamicImage::ImageRgba8(buffer)
+        .resize_to_fill(w, h, image::imageops::FilterType::Triangle)
+        .into_rgba8()
 }
 
 #[cfg(test)]
@@ -185,6 +225,102 @@ mod tests {
         let path = tmp.to_string_lossy().into_owned();
         assert!(load(&path, 16, 16, 0.0).is_none());
         assert!(!is_animated(&path));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn the_file_sniff_needs_only_the_magic() {
+        let dir = std::env::temp_dir();
+        let gif = dir.join(format!("start-menu-sniff-{}.gif", std::process::id()));
+        std::fs::write(&gif, two_frame_gif()).unwrap();
+        assert!(is_gif_file(&gif.to_string_lossy()));
+        let png = dir.join(format!("start-menu-sniff-{}.png", std::process::id()));
+        // A file too short to hold a magic is a false, never a panic.
+        std::fs::write(&png, b"\x89PNG").unwrap();
+        assert!(!is_gif_file(&png.to_string_lossy()));
+        assert!(!is_gif_file("/does/not/exist.gif"));
+        let _ = std::fs::remove_file(&gif);
+        let _ = std::fs::remove_file(&png);
+    }
+
+    #[test]
+    fn a_frame_is_cover_cropped_not_stretched() {
+        // 8x4, leftmost column red. Cover-cropped into a 16x16 tile (scale 4
+        // -> 32 wide, centre-cropped to 16) that column falls outside the
+        // crop; a stretch to 16x16 would keep it against the left edge.
+        let mut src = image::RgbaImage::from_pixel(8, 4, image::Rgba([255, 255, 255, 255]));
+        for y in 0..4 {
+            src.put_pixel(0, y, image::Rgba([255, 0, 0, 255]));
+        }
+        let out = fit(src, 16, 16);
+        assert_eq!(out.dimensions(), (16, 16));
+        assert!(
+            !out.pixels().any(|p| p.0[0] > 200 && p.0[1] < 100),
+            "the cropped-away red column survived: the frame was stretched, not cropped"
+        );
+    }
+
+    /// `n` frames, so the frame cap can be tested without a huge fixture.
+    fn long_gif(n: usize) -> Vec<u8> {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        use image::{Rgba, RgbaImage};
+        let mut buf = Vec::new();
+        {
+            let mut enc = GifEncoder::new_with_speed(&mut buf, 30);
+            enc.set_repeat(Repeat::Infinite).unwrap();
+            for i in 0..n {
+                let shade = (i % 2) as u8 * 255;
+                let frame = RgbaImage::from_pixel(4, 4, Rgba([shade, 0, 0, 255]));
+                enc.encode_frame(image::Frame::from_parts(
+                    frame,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(100, 1),
+                ))
+                .unwrap();
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn a_very_long_gif_is_capped_rather_than_held_whole() {
+        let tmp = std::env::temp_dir().join(format!("start-menu-long-{}.gif", std::process::id()));
+        std::fs::write(&tmp, long_gif(MAX_FRAMES + 7)).unwrap();
+        let path = tmp.to_string_lossy().into_owned();
+        let a = load(&path, 8, 8, 0.0).expect("long gif should still decode");
+        assert_eq!(a.frames.len(), MAX_FRAMES);
+        assert_eq!(a.delays.len(), MAX_FRAMES);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A 5000x5000 canvas holding one 1x1 frame: valid GIF, 100 MB of canvas
+    /// to allocate before the frame is ever reached.
+    fn big_canvas_gif() -> Vec<u8> {
+        let mut g = b"GIF89a".to_vec();
+        g.extend_from_slice(&5000u16.to_le_bytes()); // logical screen width
+        g.extend_from_slice(&5000u16.to_le_bytes()); // height
+        g.extend_from_slice(&[0x80, 0x00, 0x00]); // global colour table, 2 entries
+        g.extend_from_slice(&[0, 0, 0, 255, 255, 255]); // black, white
+        g.extend_from_slice(&[0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0]); // 1x1 image
+        g.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]); // LZW: clear, pixel, end
+        g.push(0x3B); // trailer
+        g
+    }
+
+    #[test]
+    fn a_huge_declared_canvas_is_refused_not_allocated() {
+        let bytes = big_canvas_gif();
+        // The control: the bytes really do decode when the decoder is left
+        // unlimited, which is how `image` starts out. So the refusal below is
+        // the limits, not a broken fixture.
+        let control = GifDecoder::new(std::io::Cursor::new(bytes.clone())).unwrap();
+        assert_eq!(control.into_frames().count(), 1);
+
+        let tmp = std::env::temp_dir().join(format!("start-menu-huge-{}.gif", std::process::id()));
+        std::fs::write(&tmp, &bytes).unwrap();
+        let path = tmp.to_string_lossy().into_owned();
+        assert!(load(&path, 16, 16, 0.0).is_none());
         let _ = std::fs::remove_file(&tmp);
     }
 

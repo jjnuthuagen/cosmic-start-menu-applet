@@ -412,6 +412,18 @@ pub fn line_height(line: &Line) -> f32 {
     }
 }
 
+/// Height of a labelled block at the top of the column: a `Line::Label` and
+/// `rows` rows under it.
+///
+/// `app.rs` measures the Most used and Folders blocks with this, and a label
+/// costs `ZONE_LABEL_HEIGHT` both here and in `line_height`, so the offset a
+/// letter jump scrolls to is the height the plan actually draws. Recomputing
+/// it in `app.rs` with a header's height scrolled the Folders jump 6 px past
+/// its header.
+pub fn block_height(rows: usize) -> f32 {
+    ZONE_LABEL_HEIGHT + rows as f32 * ROW_HEIGHT
+}
+
 /// The stops of a plan, in order, each with how far down the column it is.
 pub fn stops(lines: &[Line]) -> Vec<Stop> {
     let mut out = Vec::new();
@@ -483,7 +495,17 @@ pub fn plan(v: &ListView<'_>) -> Vec<Line> {
                 let open = v.open_folders.contains(&fi);
                 out.push(Line::Folder { index: fi, open });
                 if open {
-                    out.extend(folder.apps.iter().copied().map(Line::FolderApp));
+                    // Not the pinned block's apps either: an app can be both
+                    // pinned and filed in a folder, and drawing it twice would
+                    // break the one-row-per-app rule every other section keeps.
+                    out.extend(
+                        folder
+                            .apps
+                            .iter()
+                            .copied()
+                            .filter(|i| !top.contains(i))
+                            .map(Line::FolderApp),
+                    );
                 }
             }
             az(&mut out, apps::sections_of_excluding(list, v.loose, &top));
@@ -820,5 +842,61 @@ mod tests {
             20.0 + 2.0 * 10.0 + 20.0 + 10.0 + 20.0 + 2.0 * 10.0
         );
         assert_eq!(offset_of(&s, 0, &'#', 10.0, 20.0), 0.0);
+    }
+
+    #[test]
+    fn an_open_folder_does_not_redraw_a_pinned_app() {
+        let apps = vec![app("a", "Alpha"), app("b", "Beta")];
+        let folders = vec![Folder {
+            name: "Office".into(),
+            apps: vec![0, 1],
+        }];
+        let open: HashSet<usize> = [0].into();
+        let most = vec!["b".to_string()];
+        let lines = plan(&ListView {
+            apps: &apps,
+            most_used: most.as_slice(),
+            recent: &[],
+            show_most_used: true,
+            mode: ListMode::Folders,
+            folders: &folders,
+            loose: &[],
+            open_folders: &open,
+            list_id: cosmic::widget::Id::new("test"),
+        });
+        // "Beta" is pinned in the Most used block, so the open folder that
+        // also holds it draws only "Alpha" — one row per app, as every other
+        // section already does.
+        assert!(lines.contains(&Line::FolderApp(0)));
+        assert!(!lines.contains(&Line::FolderApp(1)));
+        assert!(lines.contains(&Line::App(1)));
+    }
+
+    #[test]
+    fn the_folders_block_height_matches_the_lines_it_draws() {
+        let apps = vec![app("a", "Alpha"), app("b", "Beta")];
+        let folders = vec![
+            Folder {
+                name: "Office".into(),
+                apps: vec![1],
+            },
+            Folder {
+                name: "Tools".into(),
+                apps: vec![0],
+            },
+        ];
+        let open: HashSet<usize> = [0].into();
+        let mut v = view_of(&apps, &folders, &open);
+        v.mode = ListMode::Folders;
+        let lines = plan(&v);
+        // Everything but the trailing Settings row is the Folders block: its
+        // label, two folder rows, and the open folder's app. `app.rs` places a
+        // letter jump with `block_height`; if that disagrees with the height
+        // the plan draws (as a header height did), the jump lands off by the
+        // difference.
+        let block: Vec<&Line> = lines.iter().filter(|l| **l != Line::Settings).collect();
+        let drawn: f32 = block.iter().copied().map(line_height).sum();
+        assert_eq!(block.len(), 4);
+        assert_eq!(drawn, block_height(folders.len() + 1));
     }
 }

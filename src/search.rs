@@ -4,7 +4,20 @@
 use crate::apps::App;
 
 /// Lower is better. `None` means no match.
+///
+/// Every whitespace-separated word in `q` must match somewhere and the app
+/// scores its worst-matching word, so "office libre" finds LibreOffice and
+/// "fire fox" finds Firefox — neither is a prefix, substring or keyword as a
+/// whole — while a query with a word an app has nowhere still excludes it.
 fn score(app: &App, q: &str) -> Option<u8> {
+    q.split_whitespace()
+        .map(|word| score_word(app, word))
+        .try_fold(0u8, |worst, hit| hit.map(|h| worst.max(h)))
+}
+
+/// One word: 0 starts the name, 1 starts one of its words, 2 is anywhere in
+/// it, 3 is in the generic name or the keywords.
+fn score_word(app: &App, q: &str) -> Option<u8> {
     let name = app.name.to_lowercase();
     if name.starts_with(q) {
         return Some(0);
@@ -104,5 +117,22 @@ mod tests {
     #[test]
     fn no_match_is_empty() {
         assert!(rank(&[app("Files", None, &[])], "zzz").is_empty());
+    }
+
+    #[test]
+    fn words_match_in_any_order_and_anywhere_in_the_name() {
+        let apps = vec![app("LibreOffice", None, &[]), app("Firefox", None, &[])];
+        // Neither whole query is a prefix, substring or keyword of the name,
+        // but every word is present, so the app is found.
+        assert_eq!(names(&apps, "office libre"), ["LibreOffice"]);
+        assert_eq!(names(&apps, "fire fox"), ["Firefox"]);
+        assert_eq!(names(&apps, "fox fire"), ["Firefox"]);
+    }
+
+    #[test]
+    fn every_word_must_match() {
+        let apps = vec![app("Firefox", None, &[])];
+        assert!(rank(&apps, "fire zzz").is_empty());
+        assert!(rank(&apps, "zzz fire").is_empty());
     }
 }

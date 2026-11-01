@@ -435,7 +435,12 @@ impl Config {
                     path.display(),
                     bak.display()
                 );
-                let _ = std::fs::rename(path, &bak);
+                if std::fs::rename(path, &bak).is_err() {
+                    // Could not move it aside (a read-only file, a directory in
+                    // the way): seeding and saving now would overwrite the
+                    // user's file with no copy of it left anywhere.
+                    return Self::seeded(installed, favorites);
+                }
                 let c = Self::seeded(installed, favorites);
                 if let Err(err) = c.save_to(path) {
                     tracing::warn!("{err}");
@@ -454,6 +459,17 @@ impl Config {
     pub fn update_at(path: &Path, f: impl FnOnce(&mut Config)) -> Result<Config, String> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // `load_from` recovers from an unparseable file by moving it aside and
+        // seeding an empty config. From Settings that is data loss: the pins
+        // would be replaced with nothing. Refuse and leave the file to its
+        // owner.
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        if !raw.trim().is_empty() && toml::from_str::<Config>(&raw).is_err() {
+            return Err(format!(
+                "{} is not valid TOML for this applet; fix it by hand",
+                path.display()
+            ));
+        }
         let mut config = Self::load_from(path, &[], None);
         f(&mut config);
         config.save_to(path)?;
@@ -471,7 +487,10 @@ impl Config {
                 .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
         }
         let body = toml::to_string_pretty(self).map_err(|e| format!("could not encode: {e}"))?;
-        let tmp = path.with_extension("toml.tmp");
+        // The menu and the Settings window are separate processes and both
+        // save; a shared temp name let one truncate the other's file mid-write
+        // and then rename a mangled config into place.
+        let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
         std::fs::write(&tmp, format!("{HEADER}\n{body}"))
             .map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, path)
@@ -816,6 +835,19 @@ mod tests {
         let saved = Config::update_at(&p, |c| c.show_most_used = false).unwrap();
         assert!(!saved.show_most_used);
         assert!(!Config::load_from(&p, &[], None).show_most_used);
+    }
+
+    #[test]
+    fn update_at_refuses_a_bad_file_rather_than_emptying_it() {
+        // Settings saving over an unparseable file used to seed a config with
+        // no tiles at all, destroying the pins it could not read.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("config.toml");
+        let broken = "tile_columns = \"two\"\n";
+        std::fs::write(&p, broken).unwrap();
+
+        assert!(Config::update_at(&p, |c| c.finish = TileFinish::Solid).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), broken);
     }
 
     #[test]

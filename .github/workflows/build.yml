@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Start a run by hand, for a fork whose pushes do not trigger one, or to
+  # re-run the gate without pushing an empty commit.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

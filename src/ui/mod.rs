@@ -265,6 +265,12 @@ fn tile_border(theme: &cosmic::Theme, width: f32) -> Border {
 /// `#rrggbb` (or `#rgb`) to a colour; anything else is `None`.
 pub fn parse_hex(s: &str) -> Option<Color> {
     let hex = s.trim().strip_prefix('#')?;
+    // `hex.len()` counts bytes, so a multibyte character in a 3- or 6-byte
+    // string would land the `&hex[..]` slices mid-character and panic a
+    // resident applet. Colour literals are ASCII; reject anything else first.
+    if !hex.is_ascii() {
+        return None;
+    }
     let byte = |a: &str| u8::from_str_radix(a, 16).ok();
     let (r, g, b) = match hex.len() {
         6 => (byte(&hex[0..2])?, byte(&hex[2..4])?, byte(&hex[4..6])?),
@@ -510,6 +516,15 @@ mod tests {
         assert!((short.r - 1.0).abs() < 1e-5);
         assert!((short.g - 0.0).abs() < 1e-5);
         for junk in ["", "#", "#12345", "red", "#gggggg", "e81123"] {
+            assert!(parse_hex(junk).is_none(), "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn a_multibyte_colour_is_rejected_not_a_panic() {
+        // 3 and 6 bytes — the two lengths that get sliced — with a multibyte
+        // character straddling a slice boundary, where byte slicing panicked.
+        for junk in ["#a\u{e9}", "#a\u{e9}bcd"] {
             assert!(parse_hex(junk).is_none(), "{junk:?}");
         }
     }

@@ -569,11 +569,7 @@ pub fn view<'a>(
             // and only if the file is really a GIF — stills skip this and go
             // through tileimage::masked.
             let animation = picture
-                .filter(|p| {
-                    std::fs::read(p)
-                        .ok()
-                        .is_some_and(|data| crate::gif::is_gif(&data))
-                })
+                .filter(|p| crate::gif::is_gif_file(p))
                 .and_then(|p| {
                     crate::gif::load(
                         p,

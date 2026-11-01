@@ -38,8 +38,13 @@ pub struct Folder {
 
 /// Tolerant: an unreadable file means no folders, never an error.
 pub fn parse(ron_text: &str) -> Vec<RawFolder> {
+    // One list, one `from_str`: a filter shape this build does not know takes
+    // every folder with it, so say so at warn — the Folders view then looks
+    // empty, which is otherwise explained by nothing at all.
+    // ponytail: no per-entry tolerance; a hand-rolled RON entry splitter is
+    // what it costs, and one unknown filter is a view, not a file, going away.
     ron::from_str(ron_text).unwrap_or_else(|e| {
-        tracing::debug!("App Library folders unreadable: {e}");
+        tracing::warn!("App Library folders unreadable: {e}");
         Vec::new()
     })
 }
